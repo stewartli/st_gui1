@@ -3021,6 +3021,7 @@ name = "st_gui1"
 version = "0.1.0"
 dependencies = [
  "iced",
+ "iced_highlighter",
  "open",
  "rfd",
 ]

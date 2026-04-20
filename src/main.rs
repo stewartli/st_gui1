@@ -1,96 +1,183 @@
-use iced::border::Radius;
-use iced::widget::{Column, button, column, container, row, text, text_input};
-use iced::{Border, Element, Length, Task, Theme};
+use std::process::Command;
+
+use iced::alignment::Horizontal;
+use iced::widget::text_editor::Position;
+use iced::widget::{
+    button, checkbox, column, container, row, rule, scrollable, stack, text, text_editor,
+};
+use iced::{Alignment, Color, Element, Font, Length, Task, Theme, clipboard};
+
+const MESLO: Font = Font::with_name("MesloLGM Nerd Font");
 
 #[derive(Clone)]
 enum Message {
-    SetFeat(String),
-    GoConfig,
-    GoInstall,
-    GoTweak,
-    GoUpdate,
+    Edit(text_editor::Action),
+    SaveFile(bool),
+    Run(String),
+    RunFinished(String),
+    Clip,
 }
 
 #[derive(Default)]
-enum App {
-    Config {
-        dir: String,
-        feat: String,
-    },
-    Install,
-    #[default]
-    Tweak,
-    Update,
+struct App {
+    content: text_editor::Content,
+    save: bool,
+    lang: String,
+    output: String,
+}
+
+async fn apply(lang: String, code: String, is_save: bool) -> String {
+    let out = match lang.as_str() {
+        // python3 -c "print(1+1)"
+        "py" => Command::new("python3").args(["-c", code.as_str()]).output(),
+        // R -s -e "head(mtcars)"
+        "r" => Command::new("R").args(["-s", "-e", &code]).output(),
+        // ~/duckdb -c "select now()"
+        "sql" => Command::new("/home/stli/duckdb")
+            .args(["-c", &code])
+            .output(),
+        _ => return "unknown lang".into(),
+    };
+    match out {
+        Ok(x) => {
+            if x.status.success() {
+                let mut res = String::new();
+                res.push_str(
+                    String::from_utf8_lossy(&x.stdout)
+                        .as_ref()
+                        .replace("\r\n", "\n")
+                        .trim(),
+                );
+                res.push('\n');
+                if is_save {
+                    res.push_str(&save_file(lang, code));
+                }
+                res
+            } else {
+                String::from_utf8_lossy(&x.stderr).to_string()
+            }
+        }
+        Err(e) => format!("{}: {}", e.kind(), e),
+    }
+}
+
+fn save_file(lang: String, code: String) -> String {
+    std::fs::write(format!("./test.{}", lang), code).expect("fail to write a file");
+    format!("save file to ./test.{}", lang)
 }
 
 impl App {
-    fn new() -> (Self, Task<Message>) {
-        (
-            Self::Config {
-                dir: "test/config.toml".to_string(),
-                feat: "basic".to_string(),
-            },
-            Task::done(Message::GoUpdate),
-        )
+    fn set_lang(&mut self, x: &str) {
+        self.lang = match x {
+            "py" => "python".into(),
+            "r" => "r".into(),
+            "sql" => "sql".into(),
+            _ => "txt".into(),
+        }
     }
     fn update(&mut self, msg: Message) -> Task<Message> {
         match msg {
-            Message::SetFeat(res) => {
-                if let Self::Config { feat, .. } = self {
-                    *feat = res;
-                }
+            Message::Edit(x) => {
+                self.content.perform(x);
+                Task::none()
             }
-            Message::GoConfig => {
-                *self = Self::Config {
-                    dir: "test/config.toml".into(),
-                    feat: "basic".into(),
-                };
+            Message::SaveFile(x) => {
+                self.save = x;
+                Task::none()
             }
-            Message::GoInstall => *self = Self::Install,
-            Message::GoTweak => *self = Self::Tweak,
-            Message::GoUpdate => *self = Self::Update,
+            Message::Run(x) => {
+                self.set_lang(&x);
+                let code = self.content.text();
+                Task::perform(apply(x, code, self.save), Message::RunFinished)
+            }
+            Message::RunFinished(x) => {
+                self.output = x;
+                Task::none()
+            }
+            Message::Clip => {
+                let res = self.output.clone();
+                clipboard::write(res)
+            }
         }
-        Task::none()
     }
     fn view(&self) -> Element<'_, Message> {
-        let btn = container(
-            row![
-                container(button("Config").on_press(Message::GoConfig)),
-                container(button("Install").on_press(Message::GoInstall)),
-                container(button("Tweak").on_press(Message::GoTweak)),
-                container(button("Update").on_press(Message::GoUpdate)),
-            ]
-            .spacing(10),
-        )
-        .center(Length::Fill)
-        .padding(10)
-        .style(|theme: &Theme| {
-            let palette = theme.extended_palette();
-            container::Style::default().border(Border {
-                color: palette.background.strong.color,
-                width: 2.0,
-                radius: Radius::new(25.0),
-            })
+        let input = text_editor(&self.content)
+            .on_action(Message::Edit)
+            .placeholder("type Python/R/SQL code here")
+            .highlight(&self.lang, iced_highlighter::Theme::Base16Ocean)
+            .height(300)
+            .padding(10);
+
+        let sep = rule::horizontal(2).style(|_| rule::Style {
+            color: Color::from_rgb8(212, 38, 100),
+            radius: 0.0.into(),
+            fill_mode: rule::FillMode::Full,
+            snap: true,
         });
 
-        let ctx: Column<'_, Message> = match self {
-            Self::Config { dir, feat } => column![
-                text_input("features", feat).on_input(Message::SetFeat),
-                text!("your config located {} with {} feature", dir, feat)
-            ],
-            Self::Update => column![text!("welcome to update software")],
-            _ => column![text!("hello")],
+        let stat_bar = {
+            let btn_lang = row![
+                button(text("PYTHON").align_x(Alignment::Center))
+                    .padding([5, 10])
+                    .width(Length::Fill)
+                    .on_press(Message::Run("py".into())),
+                button(text("R").align_x(Alignment::Center))
+                    .padding([5, 10])
+                    .width(Length::Fill)
+                    .on_press(Message::Run("r".into())),
+                button(text("SQL").align_x(Alignment::Center))
+                    .padding([5, 10])
+                    .width(Length::Fill)
+                    .on_press(Message::Run("sql".into())),
+                checkbox(self.save)
+                    .label("save")
+                    .on_toggle(Message::SaveFile)
+                    .width(Length::Fill),
+            ]
+            .spacing(2);
+
+            let pos = {
+                let Position { line, column: col } = self.content.cursor().position;
+                text!("[{}-{}]", line + 1, col + 1).size(16)
+            }
+            .width(Length::Fill)
+            .align_x(Horizontal::Right);
+
+            row![btn_lang, pos].width(Length::Fill).padding(10)
         };
 
-        column![btn, ctx].spacing(10).padding(10).into()
+        let res = stack!(
+            container(
+                scrollable(text(&self.output).size(14))
+                    .height(300)
+                    .width(Length::Fill)
+            )
+            .padding(10)
+            .style(|_theme| container::Style {
+                background: Some(Color::from_rgb8(248, 249, 250).into()),
+                border: iced::Border {
+                    color: Color::from_rgb8(80, 80, 80),
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                ..Default::default()
+            }),
+            container(button(text("Copy").font(MESLO)).on_press(Message::Clip))
+                .align_right(Length::Fill),
+        );
+
+        container(column![input, sep, stat_bar, res].spacing(12))
+            .padding(10)
+            .into()
     }
     fn theme(&self) -> Theme {
-        Theme::Dracula
+        Theme::GruvboxLight
     }
 }
 
 fn main() -> iced::Result {
-    iced::application(App::new, App::update, App::view)
+    iced::application(App::default, App::update, App::view)
         .theme(App::theme)
+        .title("CA Analytics")
         .run()
 }
